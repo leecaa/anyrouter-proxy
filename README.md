@@ -1,5 +1,7 @@
 # AnyRouter Proxy
 
+> Inspired by [dalia-abdallah25/anyrouter-opencode-bridge](https://github.com/dalia-abdallah25/anyrouter-opencode-bridge)
+
 [中文文档](README_zh.md)
 
 A local bridge/proxy service designed to enhance API access and bypass common restrictions. It connects local client applications to the upstream AnyRouter API, handling request filtering, tool injection for Claude models, and HTTP/2 transport seamlessly.
