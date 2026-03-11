@@ -1,0 +1,19 @@
+[Unit]
+Description=AnyRouter OpenCode Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__ROOT_DIR__
+ExecStart=__VENV_DIR__/bin/python __ROOT_DIR__/main.py
+Restart=on-failure
+RestartSec=5
+Environment=ANYROUTER_BRIDGE_CONFIG=__CONFIG_DIR__/proxy_config.json
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=anyrouter-bridge
+
+[Install]
+WantedBy=multi-user.target

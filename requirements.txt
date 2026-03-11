@@ -1,0 +1,4 @@
+fastapi
+uvicorn
+curl_cffi
+python-multipart

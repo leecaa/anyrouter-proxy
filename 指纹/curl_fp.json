@@ -1,0 +1,185 @@
+{
+  "donate": "Please consider donating to keep this API running. Visit https://tls.peet.ws",
+  "ip": "198.51.100.1:64426",
+  "http_version": "h2",
+  "method": "GET",
+  "user_agent": "curl/8.7.1",
+  "tls": {
+    "ciphers": [
+      "TLS_AES_256_GCM_SHA384",
+      "TLS_CHACHA20_POLY1305_SHA256",
+      "TLS_AES_128_GCM_SHA256",
+      "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+      "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384",
+      "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384",
+      "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+      "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
+      "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256",
+      "TLS_DHE_RSA_WITH_AES_256_CBC_SHA",
+      "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+      "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+      "TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+      "0xFF85",
+      "0x00C4",
+      "TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA",
+      "TLS_GOSTR341001_WITH_28147_CNT_IMIT",
+      "TLS_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_RSA_WITH_AES_256_CBC_SHA256",
+      "TLS_RSA_WITH_AES_256_CBC_SHA",
+      "0x00C0",
+      "TLS_RSA_WITH_CAMELLIA_256_CBC_SHA",
+      "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
+      "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256",
+      "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+      "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+      "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256",
+      "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
+      "TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA256",
+      "TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA",
+      "TLS_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_RSA_WITH_AES_128_CBC_SHA256",
+      "TLS_RSA_WITH_AES_128_CBC_SHA",
+      "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA256",
+      "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA",
+      "TLS_ECDHE_RSA_WITH_RC4_128_SHA",
+      "TLS_ECDHE_ECDSA_WITH_RC4_128_SHA",
+      "TLS_RSA_WITH_RC4_128_SHA",
+      "TLS_RSA_WITH_RC4_128_MD5",
+      "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA",
+      "TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA",
+      "TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA",
+      "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+      "TLS_EMPTY_RENEGOTIATION_INFO"
+    ],
+    "extensions": [
+      {
+        "name": "supported_versions (43)",
+        "versions": [
+          "TLS 1.3",
+          "TLS 1.2",
+          "TLS 1.1",
+          "TLS 1.0"
+        ]
+      },
+      {
+        "name": "key_share (51)",
+        "shared_keys": [
+          {
+            "X25519 (29)": "da3a2ec36b4034b85b08aee133b4446afd07cfe31323aac82522d969725f897b"
+          }
+        ]
+      },
+      {
+        "name": "server_name (0)",
+        "server_name": "tls.peet.ws"
+      },
+      {
+        "name": "ec_point_formats (11)",
+        "elliptic_curves_point_formats": [
+          "0x00"
+        ]
+      },
+      {
+        "name": "supported_groups (10)",
+        "supported_groups": [
+          "X25519 (29)",
+          "P-256 (23)",
+          "P-384 (24)",
+          "P-521 (25)"
+        ]
+      },
+      {
+        "name": "signature_algorithms (13)",
+        "signature_algorithms": [
+          "rsa_pss_rsae_sha512",
+          "rsa_pkcs1_sha512",
+          "ecdsa_secp521r1_sha512",
+          "rsa_pss_rsae_sha384",
+          "rsa_pkcs1_sha384",
+          "ecdsa_secp384r1_sha384",
+          "rsa_pss_rsae_sha256",
+          "rsa_pkcs1_sha256",
+          "ecdsa_secp256r1_sha256",
+          "rsa_pkcs1_sha1",
+          "ecdsa_sha1"
+        ]
+      },
+      {
+        "name": "application_layer_protocol_negotiation (16)",
+        "protocols": [
+          "h2",
+          "http/1.1"
+        ]
+      }
+    ],
+    "tls_version_record": "771",
+    "tls_version_negotiated": "772",
+    "ja3": "771,4866-4867-4865-49200-49196-49192-49188-49172-49162-159-107-57-52393-52392-52394-65413-196-136-129-157-61-53-192-132-49199-49195-49191-49187-49171-49161-158-103-51-190-69-156-60-47-186-65-49169-49159-5-4-49170-49160-22-10-255,43-51-0-11-10-13-16,29-23-24-25,0",
+    "ja3_hash": "2bab0327a296230f9f6427341e716ea0",
+    "ja4": "t13d497h2_0d8feac7bc37_7395dae3b2f3",
+    "ja4_r": "t13d497h2_0004,0005,000a,0016,002f,0033,0035,0039,003c,003d,0041,0045,0067,006b,0081,0084,0088,009c,009d,009e,009f,00ba,00be,00c0,00c4,00ff,1301,1302,1303,c007,c008,c009,c00a,c011,c012,c013,c014,c023,c024,c027,c028,c02b,c02c,c02f,c030,cca8,cca9,ccaa,ff85_000a,000b,000d,002b,0033_0806,0601,0603,0805,0501,0503,0804,0401,0403,0201,0203",
+    "peetprint": "772-771-770-769|2-1.1|29-23-24-25|2054-1537-1539-2053-1281-1283-2052-1025-1027-513-515|0||4866-4867-4865-49200-49196-49192-49188-49172-49162-159-107-57-52393-52392-52394-65413-196-136-129-157-61-53-192-132-49199-49195-49191-49187-49171-49161-158-103-51-190-69-156-60-47-186-65-49169-49159-5-4-49170-49160-22-10-255|0-10-11-13-16-43-51",
+    "peetprint_hash": "b086883ed8ef8b2412c647ebd2ceef39",
+    "client_random": "cd850c6fc0ff122904b39da089ffde59e947d2c66fa63cd8b51beaac99a1ad68",
+    "session_id": "b3d1f06719775cc0ea840387fde106ec8ee19ea33de2ce6f2eb3d37e0e549e96"
+  },
+  "http2": {
+    "akamai_fingerprint": "3:100;4:10485760;2:0|1048510465|0|m,s,a,p",
+    "akamai_fingerprint_hash": "64a832f547be33249bf4d33e8a46c5dc",
+    "sent_frames": [
+      {
+        "frame_type": "SETTINGS",
+        "length": 18,
+        "settings": [
+          "MAX_CONCURRENT_STREAMS = 100",
+          "INITIAL_WINDOW_SIZE = 10485760",
+          "ENABLE_PUSH = 0"
+        ]
+      },
+      {
+        "frame_type": "WINDOW_UPDATE",
+        "length": 4,
+        "increment": 1048510465
+      },
+      {
+        "frame_type": "HEADERS",
+        "stream_id": 1,
+        "length": 35,
+        "headers": [
+          ":method: GET",
+          ":scheme: https",
+          ":authority: tls.peet.ws",
+          ":path: /api/all",
+          "user-agent: curl/8.7.1",
+          "accept: */*"
+        ],
+        "flags": [
+          "EndStream (0x1)",
+          "EndHeaders (0x4)"
+        ]
+      }
+    ]
+  },
+  "tcpip": {
+    "cap_length": 387,
+    "dst_port": 443,
+    "src_port": 64426,
+    "ip": {
+      "ttl": 49,
+      "ip_version": 4,
+      "dst_ip": "198.51.100.2",
+      "src_ip": "198.51.100.1"
+    },
+    "tcp": {
+      "ack": 1056063821,
+      "checksum": 15969,
+      "seq": 995894637,
+      "window": 2061
+    }
+  }
+}

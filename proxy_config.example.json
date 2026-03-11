@@ -1,0 +1,12 @@
+{
+    "api_key": "",
+    "proxy_url": "http://127.0.0.1:2080",
+    "use_proxy": true,
+    "debug": false,
+    "target_base_url": "https://anyrouter.top/v1",
+    "host": "127.0.0.1",
+    "port": 8765,
+    "dashboard_password": "",
+    "dashboard_secret": "",
+    "api_auth_key": ""
+}

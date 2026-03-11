@@ -1,0 +1,38 @@
+# User config
+proxy_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+
+# Secrets & Keys
+*.pem
+*.key
+*.cert
+*.crt
+keys/
+secrets/
+
+# Node
+node_modules/
+
+# DB
+*.sqlite
+*.db
+
+# Logs & Cache
+*.log
+logs/
+.cache/
+cache/
+
+# Debug/capture files
+capture_claude_code.py
+captured_requests.json
+request_body_*.json
+test_models.py
+main_v22_full.py
