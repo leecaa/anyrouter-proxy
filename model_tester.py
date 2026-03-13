@@ -137,12 +137,14 @@ def _test_headers(model_name: str) -> dict:
     return headers
 
 
-async def test_single_model(session, config: dict, model_name: str, header_fn) -> dict:
+async def test_single_model(session, config: dict, model_name: str, header_fn, api_key: str = "") -> dict:
     """Test a single model using curl_cffi session (via asyncio.to_thread)."""
     target_url = f"{config['target_base_url']}/messages"
     if _needs_claude_code(model_name):
         target_url += "?beta=true"
     headers = _test_headers(model_name)
+    if api_key:
+        headers["x-api-key"] = api_key
 
     body = {
         "model": model_name,
@@ -183,8 +185,8 @@ async def test_single_model(session, config: dict, model_name: str, header_fn) -
     return result
 
 
-async def test_all_models(session, config: dict, header_fn) -> dict[str, dict]:
+async def test_all_models(session, config: dict, header_fn, api_key: str = "") -> dict[str, dict]:
     results = {}
     for model in MODELS:
-        results[model] = await test_single_model(session, config, model, header_fn)
+        results[model] = await test_single_model(session, config, model, header_fn, api_key)
     return results

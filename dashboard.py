@@ -146,6 +146,10 @@ main{{max-width:1200px;margin:0 auto;padding:24px}}
 <header>
   <h1>AnyRouter Bridge Dashboard</h1>
   <div class="actions">
+    <input type="password" id="apiToken" placeholder="API Key for testing" style="
+      padding:7px 12px;border:1px solid #3a3a5e;border-radius:6px;
+      background:#12121f;color:#fff;font-size:13px;width:220px;outline:none;
+    ">
     <button class="btn btn-primary" id="btnTestAll" onclick="testAll()">Test All Models</button>
     <form method="POST" action="/dashboard/logout" style="margin:0">
       <button type="submit" class="btn btn-outline">Logout</button>
@@ -202,13 +206,19 @@ function updateStats(){{
   document.getElementById('numLimit').textContent=vals.filter(r=>r.status==='rate_limited').length;
 }}
 
+function getToken(){{return document.getElementById('apiToken').value.trim();}}
+
 async function api(url,opts={{}}){{
-  const resp=await fetch(url,{{method:'POST',...opts}});
+  const token=getToken();
+  const headers=opts.headers||{{}};
+  if(token) headers['x-api-key']=token;
+  const resp=await fetch(url,{{method:'POST',...opts,headers}});
   if(resp.status===401){{window.location='/dashboard/login';return null;}}
   return resp.json();
 }}
 
 async function testOne(model){{
+  if(!getToken()){{alert('Please enter an API Key first');return;}}
   results[model]={{...results[model],status:'testing'}};
   renderAll();
   const data=await api(`/api/test/${{encodeURIComponent(model)}}`);
@@ -216,6 +226,7 @@ async function testOne(model){{
 }}
 
 async function testAll(){{
+  if(!getToken()){{alert('Please enter an API Key first');return;}}
   const btn=document.getElementById('btnTestAll');
   const bar=document.getElementById('globalLoading');
   btn.disabled=true;btn.textContent='Testing...';bar.style.display='block';

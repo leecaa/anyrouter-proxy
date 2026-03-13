@@ -467,7 +467,8 @@ async def dashboard_page(request: Request):
 async def api_test_all(request: Request):
     if not _check_auth(request):
         raise HTTPException(status_code=401, detail="Not authenticated")
-    results = await test_all_models(SESSION, config, get_claude_headers)
+    api_key = request.headers.get("x-api-key", "")
+    results = await test_all_models(SESSION, config, get_claude_headers, api_key)
     return results
 
 @app.post("/api/test/{model_name}")
@@ -476,7 +477,8 @@ async def api_test_one(model_name: str, request: Request):
         raise HTTPException(status_code=401, detail="Not authenticated")
     if model_name not in MODELS:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_name}")
-    result = await test_single_model(SESSION, config, model_name, get_claude_headers)
+    api_key = request.headers.get("x-api-key", "")
+    result = await test_single_model(SESSION, config, model_name, get_claude_headers, api_key)
     return result
 
 @app.get("/api/model-status")
