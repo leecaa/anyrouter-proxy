@@ -55,9 +55,11 @@ cp proxy_config.example.json proxy_config.json
 **核心配置项与端口说明：**
 - `host`: 服务绑定的本地 IP 地址。默认值为 `127.0.0.1`（仅允许本地访问）。如需局域网或公网访问，请修改为 `0.0.0.0`。
 - `port`: 代理 API 服务和 Dashboard 控制台的运行端口。默认端口为 **8765**。
-- `api_key`: 您的上游 AnyRouter API 密钥。这是转发请求所必需的凭证。
 - `dashboard_password`: 访问 Web Dashboard 控制台的登录密码。请务必设置一个安全的密码。
 - `target_base_url`: 上游 API 目标地址。默认为 `https://anyrouter.top/v1`。
+
+**认证模型说明：**
+本代理采用 **透明透传** 认证模型。代理本身不存储或校验 API 密钥，客户端需在每次请求中自行携带上游 API 密钥（通过 `x-api-key` 请求头或 `Authorization: Bearer` Token），代理会将其直接转发至上游服务。
 
 ### 4. 运行代理服务
 
@@ -108,7 +110,7 @@ journalctl -u anyrouter-opencode-bridge -f
 
 ## 安全建议
 
-请务必阅读 [SECURITY.md](SECURITY.md) 安全指南。若将服务绑定到 `0.0.0.0` 并暴露在公网，必须配置 `api_auth_key` 并在客户端请求中携带该 Auth Token，否则代理将被滥用。切勿将您的 `.env` 或 `proxy_config.json` 提交到公开代码库。
+请务必阅读 [SECURITY.md](SECURITY.md) 安全指南。本代理采用透明 API 密钥透传模型——客户端在每次请求中自行携带上游 API 密钥。若将服务绑定到 `0.0.0.0` 并暴露在公网，请确保有适当的网络层访问控制。切勿将您的 `.env` 或 `proxy_config.json` 提交到公开代码库。
 
 ## 开源协议
 

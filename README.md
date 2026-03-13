@@ -57,9 +57,11 @@ cp proxy_config.example.json proxy_config.json
 **Key Configurations & Ports:**
 - `host`: The local IP address to bind to. Default is `127.0.0.1` (only accessible locally). Set to `0.0.0.0` if you need to access it from other machines.
 - `port`: The port the proxy and dashboard will run on. Default is **8765**.
-- `api_key`: Your upstream AnyRouter API Key. Required to forward requests successfully.
 - `dashboard_password`: The password required to access the Web Dashboard. Make sure to set a secure password.
 - `target_base_url`: Upstream API URL. Default is `https://anyrouter.top/v1`.
+
+**Authentication Model:**
+This proxy uses a **transparent passthrough** model for API authentication. The proxy does **not** store or validate API keys itself. Instead, clients must include their own upstream API key in each request (via `x-api-key` header or `Authorization: Bearer` token), and the proxy forwards it directly to the upstream service.
 
 ### 4. Run the Proxy Server
 
@@ -106,7 +108,7 @@ To uninstall: `sudo ./linux/uninstall.sh`
 
 ## Security
 
-Please review the [SECURITY.md](SECURITY.md) guidelines. Never expose your local proxy (`0.0.0.0`) to the public internet without proper authentication (`api_auth_key`). Do not commit your `.env` or `proxy_config.json` files.
+Please review the [SECURITY.md](SECURITY.md) guidelines. The proxy uses a transparent API key passthrough model — clients provide their own upstream API key in each request. If binding to `0.0.0.0`, ensure proper network-level access controls are in place. Do not commit your `.env` or `proxy_config.json` files.
 
 ## License
 
