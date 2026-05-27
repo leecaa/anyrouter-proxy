@@ -421,12 +421,11 @@ def _extract_client_key(request: Request) -> str:
 
 
 # --- Model strategy ---
-# The client's `model` field is passed through verbatim to upstream
-# `/v1/messages`. Proxy does NOT override the model, does NOT fall back to
-# another model, and does NOT trip a circuit breaker. If the upstream rejects
-# the model (e.g. returns 503 for an overloaded model, 404 for an unknown
-# model), that error is propagated to the downstream client as-is so the
-# downstream (e.g. NewAPI) can decide how to handle it.
+# The proxy ALWAYS uses claude-opus-4-7 against the upstream `/v1/messages`,
+# regardless of what model the client sent. There is NO fallback: if upstream
+# returns 5xx for opus-4-7, that error is propagated to the downstream client
+# as-is (no swap to another model, no retry).
+FORCED_UPSTREAM_MODEL = "claude-opus-4-7"
 DEFAULT_MAX_TOKENS = 4096
 
 
@@ -545,9 +544,11 @@ async def _run_openai_translated_request(
     wants_stream = bool(openai_body.get("stream"))
     include_usage = bool((openai_body.get("stream_options") or {}).get("include_usage"))
 
-    # Pass through the client's model verbatim. NO override, NO fallback,
-    # NO circuit breaker. Upstream errors propagate as-is to the downstream.
-    effective_model = model or "claude-opus-4-7"
+    # FORCED model override: regardless of what the client requested, we always
+    # send claude-opus-4-7 to upstream. NO fallback — upstream errors propagate
+    # transparently. The downstream response's `model` field also reports
+    # claude-opus-4-7 (the actual model that produced the answer).
+    effective_model = FORCED_UPSTREAM_MODEL
     anthropic_body["model"] = effective_model
 
     resolved_key = get_next_global_key(_extract_client_key(request))
