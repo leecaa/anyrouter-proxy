@@ -1013,7 +1013,10 @@ class AnthropicSSEToResponsesStream:
             self.output_index += 1
 
             if btype == "text":
-                item_id = f"msg_{self.message_id or uuid.uuid4().hex[:12]}_{output_idx}"
+                # Preserve upstream message id when present (avoid double "msg_"
+                # prefix — Anthropic ids already start with "msg_").
+                base = self.message_id or f"msg_{uuid.uuid4().hex[:12]}"
+                item_id = base if output_idx == 0 else f"{base}_{output_idx}"
                 self._block_state[idx] = {
                     "kind": "text",
                     "item_id": item_id,

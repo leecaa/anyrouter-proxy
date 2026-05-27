@@ -3,6 +3,7 @@ import hashlib
 import sys
 import os
 import secrets
+import time
 import uuid
 import traceback
 import argparse
@@ -432,6 +433,32 @@ def _extract_client_key(request: Request) -> str:
 PRIMARY_MODEL = "claude-opus-4-7"
 FALLBACK_MODEL = "claude-haiku-4-5-20251001"
 
+# Circuit breaker: when PRIMARY_MODEL returns 5xx/429, mark it unhealthy for
+# this many seconds so subsequent requests skip the futile opus attempt and
+# go straight to FALLBACK_MODEL. This dramatically improves TTFB seen by
+# downstream proxies (e.g. NewAPI) that may cancel slow streams.
+_PRIMARY_BREAKER_COOLDOWN_S = 60.0
+_primary_unhealthy_until: float = 0.0
+_breaker_lock = threading.Lock()
+
+
+def _select_initial_model() -> str:
+    """Returns the model name to try first based on the circuit breaker state."""
+    with _breaker_lock:
+        if time.time() < _primary_unhealthy_until:
+            return FALLBACK_MODEL
+    return PRIMARY_MODEL
+
+
+def _mark_primary_unhealthy():
+    """Trip the circuit breaker for PRIMARY_MODEL."""
+    global _primary_unhealthy_until
+    with _breaker_lock:
+        _primary_unhealthy_until = time.time() + _PRIMARY_BREAKER_COOLDOWN_S
+        if config.get('debug'):
+            print(f"[CIRCUIT-BREAKER] {PRIMARY_MODEL} marked unhealthy for "
+                  f"{_PRIMARY_BREAKER_COOLDOWN_S}s")
+
 
 def _is_claude_model(model_name: str) -> bool:
     """True if the model name suggests an Anthropic Claude model (case-insensitive)."""
@@ -549,13 +576,15 @@ async def _run_openai_translated_request(
     include_usage = bool((openai_body.get("stream_options") or {}).get("include_usage"))
 
     # Override the client's model with our managed strategy:
-    # - First attempts use PRIMARY_MODEL (claude-opus-4-7).
+    # - First attempt uses PRIMARY_MODEL (claude-opus-4-7) UNLESS the circuit
+    #   breaker has tripped (i.e. PRIMARY has been 5xx recently), in which case
+    #   we go straight to FALLBACK_MODEL to keep TTFB low.
     # - On upstream 5xx/429 we fall back to FALLBACK_MODEL (claude-haiku-4-5).
     # This guarantees a real model response regardless of what the client
     # asks for and regardless of which non-haiku upstream is currently
     # overloaded.
     requested_model_for_translator = model or PRIMARY_MODEL
-    effective_model = PRIMARY_MODEL
+    effective_model = _select_initial_model()
     anthropic_body["model"] = effective_model
 
     resolved_key = get_next_global_key(_extract_client_key(request))
@@ -565,7 +594,7 @@ async def _run_openai_translated_request(
 
     target_url = "https://anyrouter.top/v1/messages"
     max_attempts = 5
-    retry_delay = 1
+    retry_delay = 0.3  # shorter than before so NewAPI downstream TTFB stays small
 
     if config['debug']:
         print(f"\n{'='*60}")
@@ -599,6 +628,7 @@ async def _run_openai_translated_request(
                         if mt in ("end", "error"):
                             break
                     if effective_model == PRIMARY_MODEL:
+                        _mark_primary_unhealthy()
                         effective_model = FALLBACK_MODEL
                         anthropic_body["model"] = effective_model
                         headers = _build_translated_anthropic_headers(
@@ -641,6 +671,7 @@ async def _run_openai_translated_request(
 
                 if resp.status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
                     if effective_model == PRIMARY_MODEL:
+                        _mark_primary_unhealthy()
                         effective_model = FALLBACK_MODEL
                         anthropic_body["model"] = effective_model
                         headers = _build_translated_anthropic_headers(
