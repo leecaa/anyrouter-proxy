@@ -36,3 +36,18 @@ captured_requests.json
 request_body_*.json
 test_models.py
 main_v22_full.py
+
+# Local handoff notes (本地接手落档, 不进版本控制)
+docs/HANDOFF-*.md
+
+# Temporary zshrc / token tooling scripts (含硬编码敏感数据或私有网关)
+clean_tokens.py
+restore_zshrc.py
+update_zshrc.py
+update_zshrc_auto_remove.py
+test_curl.sh
+
+# Local secrets store (token 池、dashboard 密码、私有 base URL)
+.secrets.json
+.secrets.local
+secrets.local.json
