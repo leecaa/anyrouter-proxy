@@ -146,10 +146,11 @@ main{{max-width:1200px;margin:0 auto;padding:24px}}
 <header>
   <h1>AnyRouter Bridge Dashboard</h1>
   <div class="actions">
-    <input type="password" id="apiToken" placeholder="API Key for testing" style="
-      padding:7px 12px;border:1px solid #3a3a5e;border-radius:6px;
-      background:#12121f;color:#fff;font-size:13px;width:220px;outline:none;
-    ">
+    <textarea id="apiToken" placeholder="API Key 池 (每行一个 Key)&#10;支持输入多个Key，系统将自动轮询与重试" style="
+      padding:6px 12px;border:1px solid #3a3a5e;border-radius:6px;
+      background:#12121f;color:#fff;font-size:12px;width:320px;height:45px;
+      outline:none;resize:vertical;font-family:monospace;line-height:1.4;
+    "></textarea>
     <button class="btn btn-primary" id="btnTestAll" onclick="testAll()">Test All Models</button>
     <form method="POST" action="/dashboard/logout" style="margin:0">
       <button type="submit" class="btn btn-outline">Logout</button>
@@ -170,7 +171,7 @@ main{{max-width:1200px;margin:0 auto;padding:24px}}
   <div class="grid" id="grid"></div>
 </main>
 <script>
-const MODELS={models_json};
+let MODELS={models_json};
 let results={{}};
 
 function badge(status){{
@@ -208,42 +209,137 @@ function updateStats(){{
 
 function getToken(){{return document.getElementById('apiToken').value.trim();}}
 
+async function fetchModels(){{
+  const token=getToken();
+  if(!token) return;
+  console.log("[fetchModels] Starting models fetch...");
+  try{{
+    const resp=await fetch('/v1/models',{{
+      headers:{{'x-api-key':token.replace(/\\r?\\\\n/g, ',')}}
+    }});
+    console.log("[fetchModels] Server returned HTTP status: " + resp.status);
+    if(resp.status===200){{
+      const data=await resp.json();
+      console.log("[fetchModels] Parsed response data: ", data);
+      if(data && Array.isArray(data.data)){{
+        const fetched=data.data.map(m=>m.id);
+        if(fetched.length>0){{
+          MODELS=fetched;
+          console.log("[fetchModels] Successfully updated models list to: ", MODELS);
+          MODELS.forEach(m=>{{
+            if(!results[m]) results[m]={{status:'untested'}};
+          }});
+          renderAll();
+        }}
+      }}
+    }} else {{
+      console.error("[fetchModels] Fetch failed with status " + resp.status);
+    }}
+  }}catch(e){{
+    console.error("[fetchModels] Failed to fetch models",e);
+  }}
+}}
+
 async function api(url,opts={{}}){{
   const token=getToken();
   const headers=opts.headers||{{}};
-  if(token) headers['x-api-key']=token;
-  const resp=await fetch(url,{{method:'POST',...opts,headers}});
-  if(resp.status===401){{window.location='/dashboard/login';return null;}}
-  return resp.json();
+  if(token) headers['x-api-key']=token.replace(/\\r?\\\\n/g, ',');
+  try {{
+    const resp=await fetch(url,{{method:'POST',...opts,headers}});
+    if(resp.status===401){{window.location='/dashboard/login';return null;}}
+    const contentType = resp.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {{
+      return await resp.json();
+    }} else {{
+      const text = await resp.text();
+      return {{ error: {{ message: `HTTP ${{resp.status}}: ${{text.slice(0, 100)}}` }} }};
+    }}
+  }} catch (e) {{
+    console.error("API Error: ", e);
+    return {{ error: {{ message: e.message || "Network Error" }} }};
+  }}
 }}
 
 async function testOne(model){{
   if(!getToken()){{alert('Please enter an API Key first');return;}}
+  console.log(`[testOne] Starting test for model: ${{model}}...`);
   results[model]={{...results[model],status:'testing'}};
   renderAll();
-  const data=await api(`/api/test/${{encodeURIComponent(model)}}`);
-  if(data){{results[model]=data;renderAll();}}
+  try {{
+    const data=await api(`/api/test/${{encodeURIComponent(model)}}`);
+    console.log(`[testOne] Response for ${{model}}: `, data);
+    if(data && !data.error){{
+      results[model]=data;
+    }} else if (data && data.error) {{
+      console.error(`[testOne] API returned error for ${{model}}:`, data.error.message);
+      results[model]={{
+        status: 'error',
+        error_message: data.error.message,
+        tested_at: new Date().toISOString()
+      }};
+    }}
+  }} catch (e) {{
+    console.error(`[testOne] Exception occurred for ${{model}}:`, e);
+    results[model]={{
+      status: 'error',
+      error_message: e.message,
+      tested_at: new Date().toISOString()
+    }};
+  }} finally {{
+    renderAll();
+  }}
 }}
 
 async function testAll(){{
   if(!getToken()){{alert('Please enter an API Key first');return;}}
+  console.log("[testAll] Starting batch model testing...");
   const btn=document.getElementById('btnTestAll');
   const bar=document.getElementById('globalLoading');
   btn.disabled=true;btn.textContent='Testing...';bar.style.display='block';
   MODELS.forEach(m=>{{results[m]={{...results[m],status:'testing'}}}});
   renderAll();
-  const data=await api('/api/test-all');
-  if(data){{Object.assign(results,data);renderAll();}}
-  btn.disabled=false;btn.textContent='Test All Models';bar.style.display='none';
-  document.getElementById('lastUpdate').textContent='Last update: '+new Date().toLocaleString();
+  try {{
+    const data=await api('/api/test-all');
+    console.log("[testAll] Batch test results received: ", data);
+    if(data && !data.error){{
+      Object.assign(results,data);
+    }} else if (data && data.error) {{
+      console.error("[testAll] Batch test failed:", data.error.message);
+      alert("Test execution completed with some failures: " + data.error.message);
+    }}
+  }} catch(e) {{
+    console.error("[testAll] Exception during batch test:", e);
+    alert("Error during test: " + e.message);
+  }} finally {{
+    btn.disabled=false;btn.textContent='Test All Models';bar.style.display='none';
+    document.getElementById('lastUpdate').textContent='Last update: '+new Date().toLocaleString();
+    renderAll();
+  }}
 }}
 
+// Setup listeners and load initial state
+document.getElementById('apiToken').addEventListener('input',()=>{{
+  const token=getToken();
+  localStorage.setItem('anyrouter_api_key',token);
+  fetchModels();
+}});
+
 (async()=>{{
+  const savedToken=localStorage.getItem('anyrouter_api_key');
+  if(savedToken){{
+    document.getElementById('apiToken').value=savedToken;
+  }}
+  
   const resp=await fetch('/api/model-status');
   if(resp.status===401){{window.location='/dashboard/login';return;}}
   const data=await resp.json();
-  if(data){{Object.assign(results,data);renderAll();}}
-  else{{renderAll();}}
+  if(data){{Object.assign(results,data);}}
+  
+  if(savedToken){{
+    await fetchModels();
+  }}else{{
+    renderAll();
+  }}
 }})();
 </script>
 </body>

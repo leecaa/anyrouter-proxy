@@ -17,7 +17,17 @@ import uvicorn
 from auth import create_session_token, verify_session_token, verify_password, COOKIE_NAME, MAX_AGE
 from dashboard import get_login_html, get_dashboard_html
 import model_tester
-from model_tester import MODELS, test_results, test_single_model, test_all_models
+from model_tester import MODELS, test_results, test_single_model, test_all_models, update_models, load_tokens_from_zshrc
+from openai_translator import (
+    UnsupportedParamError,
+    chat_completions_to_anthropic,
+    anthropic_to_chat_completion,
+    AnthropicSSEToChatCompletionsStream,
+    responses_request_to_anthropic,
+    anthropic_to_responses_response,
+    AnthropicSSEToResponsesStream,
+    anthropic_error_to_openai_error,
+)
 
 def resolve_config_path():
     env_path = os.environ.get("ANYROUTER_PROXY_CONFIG")
@@ -39,7 +49,59 @@ DEFAULT_CONFIG = {
     "port": 8765,
     "dashboard_password": "",
     "dashboard_secret": "",
+    "api_keys": [],
 }
+
+# --- API Key Pool and Round Robin Load Balancing ---
+GLOBAL_KEYS = []
+global_key_index = 0
+key_lock = threading.Lock()
+
+def parse_api_keys(key_str: str) -> list[str]:
+    """Parse comma, pipe, or newline delimited API keys safely."""
+    if not key_str:
+        return []
+    parts = []
+    normalized = key_str.replace("\r", "").replace("\n", ",").replace("|", ",")
+    for p in normalized.split(","):
+        k = p.strip()
+        if k:
+            parts.append(k)
+    return parts
+
+def set_global_keys(keys: list[str]):
+    global GLOBAL_KEYS
+    with key_lock:
+        GLOBAL_KEYS = [k for k in keys if k]
+
+def get_next_global_key(client_key: str = None) -> str:
+    """Get the next key from the pool. If client_key contains multiple keys, round-robin them.
+    Otherwise, if client_key is a single valid key starting with sk-, use it.
+    If no client_key is provided or it's a placeholder, use the global pool.
+    """
+    global global_key_index
+    # 1. Parse client key(s)
+    client_keys = parse_api_keys(client_key)
+    if len(client_keys) > 1:
+        with key_lock:
+            key = client_keys[global_key_index % len(client_keys)]
+            global_key_index += 1
+            return key
+    elif len(client_keys) == 1 and client_keys[0].startswith("sk-"):
+        return client_keys[0]
+        
+    # 2. Fallback to global pool
+    if GLOBAL_KEYS:
+        with key_lock:
+            key = GLOBAL_KEYS[global_key_index % len(GLOBAL_KEYS)]
+            global_key_index += 1
+            return key
+            
+    # 3. Fallback to client key even if it doesn't start with sk- (just in case)
+    if client_keys:
+        return client_keys[0]
+        
+    return ""
 
 config = {}
 SESSION = None
@@ -62,7 +124,7 @@ _ANTHROPIC_BETA_FULL = ",".join([
     "effort-2025-11-24",
     "context-1m-2025-08-07",
 ])
-_ANTHROPIC_BETA_BASIC = "interleaved-thinking-2025-05-14"
+_ANTHROPIC_BETA_BASIC = "interleaved-thinking-2025-05-14,context-1m-2025-08-07"
 
 # Stable per-instance session id (regenerated on each process start)
 _SESSION_ID = str(uuid.uuid4())
@@ -93,6 +155,52 @@ def load_claude_code_templates():
     model_tester.claude_code_tools = CLAUDE_CODE_TOOLS
     model_tester.claude_code_system = CLAUDE_CODE_SYSTEM
 
+async def fetch_upstream_models_list(api_key: str) -> list[str]:
+    """Fetch model list from upstream /v1/models using API Key."""
+    global SESSION
+    if not api_key:
+        return []
+        
+    base = config['target_base_url'].rstrip('/')
+    if "betterclau.de" in base:
+        base = "https://anyrouter.top"
+    elif base.endswith('/v1'):
+        base = base[:-3]
+    candidate_urls = [f"{base}/v1/models"]
+        
+    headers = {
+        "Accept": "application/json",
+        "x-api-key": api_key,
+        "Authorization": f"Bearer {api_key}",
+    }
+    
+    last_err = None
+    for target_url in candidate_urls:
+        try:
+            if config['debug']:
+                print(f"[SYSTEM] Fetching upstream models from {target_url}")
+            resp = await asyncio.to_thread(
+                SESSION.request, "GET", target_url, headers=headers, timeout=15
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict) and "data" in data:
+                    models = [m["id"] for m in data["data"] if isinstance(m, dict) and "id" in m]
+                    if config['debug']:
+                        print(f"[SYSTEM] Successfully fetched {len(models)} models from upstream ({target_url})")
+                    return models
+            else:
+                last_err = f"HTTP {resp.status_code}"
+                if config['debug']:
+                    print(f"[SYSTEM] Fetching models from {target_url} failed with {resp.status_code}, trying next candidate...")
+        except Exception as e:
+            last_err = str(e)
+            if config['debug']:
+                print(f"[SYSTEM] Fetching models from {target_url} raised exception: {e}, trying next candidate...")
+                
+    print(f"[SYSTEM] Failed to fetch upstream models after trying all candidates. Last error: {last_err}")
+    return []
+
 def load_config():
     global config
     if os.path.exists(CONFIG_FILE):
@@ -102,6 +210,22 @@ def load_config():
             config = DEFAULT_CONFIG.copy()
             config.update(loaded_config)
             print(f"[SYSTEM] Configuration loaded from {CONFIG_FILE}")
+            
+            # Load keys
+            config_keys = config.get("api_keys", [])
+            if isinstance(config_keys, list):
+                set_global_keys(config_keys)
+            elif isinstance(config_keys, str):
+                set_global_keys(parse_api_keys(config_keys))
+                
+            if not GLOBAL_KEYS:
+                zsh_keys = load_tokens_from_zshrc()
+                if zsh_keys:
+                    set_global_keys(zsh_keys)
+                    print(f"[SYSTEM] Fallback: Loaded {len(zsh_keys)} API Keys from ~/.zshrc")
+            else:
+                print(f"[SYSTEM] Loaded {len(GLOBAL_KEYS)} API Keys from config")
+                
             return True
         except Exception as e:
             print(f"[SYSTEM] Error loading config: {e}")
@@ -109,6 +233,11 @@ def load_config():
             return False
     else:
         config = DEFAULT_CONFIG.copy()
+        # Fallback to ~/.zshrc
+        zsh_keys = load_tokens_from_zshrc()
+        if zsh_keys:
+            set_global_keys(zsh_keys)
+            print(f"[SYSTEM] Loaded {len(zsh_keys)} API Keys from ~/.zshrc")
         return False
 
 def save_config():
@@ -279,16 +408,454 @@ async def health():
         "tls_fingerprint": "chrome",
     }
 
+def _extract_client_key(request: Request) -> str:
+    """Extract API key from request headers (x-api-key preferred, then Bearer)."""
+    k = request.headers.get("x-api-key", "")
+    if k:
+        return k
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return ""
+
+
+# --- Model override strategy ---
+# Upstream anyrouter.top behavior (validated 2026-05-27):
+#   - /v1/chat/completions 404s gpt-5.5/gpt-5-codex
+#   - /v1/responses 404s gemini-2.5-pro, 500s gpt-5-codex (load limit)
+#   - /v1/messages 503s opus/sonnet 4.x (1m context overload), 429s 3.5-haiku
+#   - Only claude-haiku-4-5-20251001 is consistently 200.
+# Strategy: regardless of what model the downstream client requests, the
+# proxy maps to claude-opus-4-7 (the flagship Claude model with 1m context),
+# and on upstream 503/429/5xx automatically falls back to
+# claude-haiku-4-5-20251001 which is the known-good baseline.
+PRIMARY_MODEL = "claude-opus-4-7"
+FALLBACK_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _is_claude_model(model_name: str) -> bool:
+    """True if the model name suggests an Anthropic Claude model (case-insensitive)."""
+    return "claude" in (model_name or "").lower()
+
+
+def _needs_context_1m_beta(model_name: str) -> bool:
+    """Whether upstream requires `anthropic-beta: context-1m-2025-08-07` for
+    this Claude model.
+
+    Empirical scan (2026-05-27): all Claude 4.x sonnet/opus and 3.5/3.7 sonnet
+    models return 400 "1m 上下文已经全量可用" without this beta.
+    claude-haiku-4-5 does NOT need it.
+    """
+    n = (model_name or "").lower()
+    if not _is_claude_model(n):
+        return False
+    if "haiku" in n:
+        return False
+    return True
+
+
+def _build_translated_anthropic_headers(
+    request: Request, resolved_key: str, effective_model: str, wants_stream: bool
+) -> dict:
+    """Headers for OpenAI→Anthropic translated requests to upstream /v1/messages.
+    Adds `anthropic-beta: context-1m-2025-08-07` only when the effective model
+    requires it (everything except haiku-4-5)."""
+    headers = {
+        "Accept": "text/event-stream" if wants_stream else "application/json",
+        "Content-Type": "application/json",
+        "anthropic-version": _ANTHROPIC_VERSION,
+    }
+    if _needs_context_1m_beta(effective_model):
+        headers["anthropic-beta"] = "context-1m-2025-08-07"
+    if resolved_key:
+        headers["x-api-key"] = resolved_key
+        headers["Authorization"] = f"Bearer {resolved_key}"
+    return headers
+
+
+async def _translated_stream(q, translator):
+    """Drain queue from _stream_worker, feed bytes into the OpenAI SSE translator,
+    yield translated OpenAI/Responses SSE chunks."""
+    loop = asyncio.get_running_loop()
+    while True:
+        msg_type, value = await loop.run_in_executor(None, q.get)
+        if msg_type == "end":
+            break
+        if msg_type == "error":
+            if config['debug']:
+                print(f"[OPENAI-TRANSLATOR] stream error: {value}")
+            break
+        if msg_type == "data":
+            try:
+                for openai_chunk in translator.feed(value):
+                    yield openai_chunk
+            except Exception as e:
+                if config['debug']:
+                    print(f"[OPENAI-TRANSLATOR] feed error: {type(e).__name__}: {e}")
+                    traceback.print_exc()
+                break
+    try:
+        for tail in translator.flush():
+            yield tail
+    except Exception as e:
+        if config['debug']:
+            print(f"[OPENAI-TRANSLATOR] flush error: {type(e).__name__}: {e}")
+
+
+async def _run_openai_translated_request(
+    request: Request,
+    *,
+    request_translator,  # callable: (openai_body) -> anthropic_body
+    response_translator,  # callable: (anthropic_body, requested_model) -> openai_body
+    stream_machine_factory,  # callable: (requested_model, include_usage) -> state machine
+    error_shape: str,  # "chat.completion" or "response"
+):
+    """Shared core: parse OpenAI body, translate to Anthropic, POST to upstream
+    /v1/messages, translate response back to OpenAI shape.
+
+    Used by both /v1/chat/completions and /v1/responses.
+    """
+    global SESSION
+
+    body = await request.body()
+    try:
+        openai_body = json.loads(body) if body else {}
+    except Exception as e:
+        return Response(
+            content=json.dumps({"error": {
+                "message": f"invalid JSON body: {e}", "type": "invalid_request_error"}}).encode(),
+            status_code=400, media_type="application/json")
+
+    try:
+        anthropic_body = request_translator(openai_body)
+    except UnsupportedParamError as e:
+        err = {"error": {
+            "message": str(e), "type": "invalid_request_error",
+            "param": getattr(e, "param", None), "code": None}}
+        return Response(content=json.dumps(err).encode(),
+                        status_code=400, media_type="application/json")
+    except Exception as e:
+        if config['debug']:
+            print(f"[OPENAI-TRANSLATOR] request translation failed: {type(e).__name__}: {e}")
+            traceback.print_exc()
+        err = {"error": {
+            "message": f"request translation failed: {e}",
+            "type": "invalid_request_error", "code": None}}
+        return Response(content=json.dumps(err).encode(),
+                        status_code=400, media_type="application/json")
+
+    model = openai_body.get("model", "")
+    wants_stream = bool(openai_body.get("stream"))
+    include_usage = bool((openai_body.get("stream_options") or {}).get("include_usage"))
+
+    # Override the client's model with our managed strategy:
+    # - First attempts use PRIMARY_MODEL (claude-opus-4-7).
+    # - On upstream 5xx/429 we fall back to FALLBACK_MODEL (claude-haiku-4-5).
+    # This guarantees a real model response regardless of what the client
+    # asks for and regardless of which non-haiku upstream is currently
+    # overloaded.
+    requested_model_for_translator = model or PRIMARY_MODEL
+    effective_model = PRIMARY_MODEL
+    anthropic_body["model"] = effective_model
+
+    resolved_key = get_next_global_key(_extract_client_key(request))
+    headers = _build_translated_anthropic_headers(
+        request, resolved_key, effective_model, wants_stream
+    )
+
+    target_url = "https://anyrouter.top/v1/messages"
+    max_attempts = 5
+    retry_delay = 1
+
+    if config['debug']:
+        print(f"\n{'='*60}")
+        print(f"[OPENAI-TRANSLATOR] Target: {target_url}")
+        print(f"[OPENAI-TRANSLATOR] Client asked for model: {model!r}")
+        print(f"[OPENAI-TRANSLATOR] Effective: {effective_model} | Stream: {wants_stream}")
+        print(f"[OPENAI-TRANSLATOR] Shape: {error_shape}")
+
+    for attempt in range(max_attempts):
+        try:
+            if wants_stream:
+                q = thread_queue.Queue(maxsize=256)
+                t = threading.Thread(
+                    target=_stream_worker,
+                    args=(SESSION, "POST", target_url, headers, anthropic_body, q),
+                    daemon=True,
+                )
+                t.start()
+                loop = asyncio.get_running_loop()
+                msg_type, value = await loop.run_in_executor(None, q.get)
+                if msg_type == "error":
+                    raise value
+                status_code = value
+                if config['debug']:
+                    print(f"[OPENAI-TRANSLATOR] upstream status: {status_code} (model={effective_model})")
+
+                if status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
+                    # drain queue, reset session, retry — swap to fallback model
+                    while True:
+                        mt, _ = await loop.run_in_executor(None, q.get)
+                        if mt in ("end", "error"):
+                            break
+                    if effective_model == PRIMARY_MODEL:
+                        effective_model = FALLBACK_MODEL
+                        anthropic_body["model"] = effective_model
+                        headers = _build_translated_anthropic_headers(
+                            request, resolved_key, effective_model, wants_stream
+                        )
+                        if config['debug']:
+                            print(f"[OPENAI-TRANSLATOR] falling back to {effective_model}")
+                    SESSION = create_session()
+                    await asyncio.sleep(retry_delay)
+                    continue
+
+                if status_code != 200:
+                    # collect upstream error body, translate to OpenAI shape
+                    chunks = []
+                    while True:
+                        mt, v = await loop.run_in_executor(None, q.get)
+                        if mt == "data":
+                            chunks.append(v if isinstance(v, bytes) else v.encode())
+                        elif mt in ("end", "error"):
+                            break
+                    err_body = anthropic_error_to_openai_error(
+                        b"".join(chunks), error_shape)
+                    return Response(content=json.dumps(err_body).encode(),
+                                    status_code=status_code,
+                                    media_type="application/json")
+
+                machine = stream_machine_factory(effective_model, include_usage)
+                return StreamingResponse(
+                    _translated_stream(q, machine),
+                    status_code=200, media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            else:
+                resp = await asyncio.to_thread(
+                    SESSION.request, "POST", target_url,
+                    headers=headers, json=anthropic_body, timeout=600,
+                )
+                if config['debug']:
+                    print(f"[OPENAI-TRANSLATOR] upstream status: {resp.status_code} (model={effective_model})")
+
+                if resp.status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
+                    if effective_model == PRIMARY_MODEL:
+                        effective_model = FALLBACK_MODEL
+                        anthropic_body["model"] = effective_model
+                        headers = _build_translated_anthropic_headers(
+                            request, resolved_key, effective_model, wants_stream
+                        )
+                        if config['debug']:
+                            print(f"[OPENAI-TRANSLATOR] falling back to {effective_model}")
+                    SESSION = create_session()
+                    await asyncio.sleep(retry_delay)
+                    continue
+
+                if resp.status_code != 200:
+                    err_body = anthropic_error_to_openai_error(
+                        resp.content, error_shape)
+                    return Response(content=json.dumps(err_body).encode(),
+                                    status_code=resp.status_code,
+                                    media_type="application/json")
+
+                try:
+                    a_body = resp.json()
+                except Exception as e:
+                    err = {"error": {
+                        "message": f"upstream returned non-JSON 200: {e}",
+                        "type": "upstream_error", "code": None}}
+                    return Response(content=json.dumps(err).encode(),
+                                    status_code=502, media_type="application/json")
+
+                try:
+                    openai_resp = response_translator(a_body, effective_model)
+                except Exception as e:
+                    if config['debug']:
+                        print(f"[OPENAI-TRANSLATOR] response translation failed: {type(e).__name__}: {e}")
+                        traceback.print_exc()
+                    err = {"error": {
+                        "message": f"response translation failed: {e}",
+                        "type": "upstream_error", "code": None}}
+                    return Response(content=json.dumps(err).encode(),
+                                    status_code=502, media_type="application/json")
+
+                return Response(content=json.dumps(openai_resp).encode(),
+                                status_code=200, media_type="application/json")
+        except Exception as e:
+            if config['debug']:
+                print(f"[OPENAI-TRANSLATOR] attempt {attempt+1} error: {type(e).__name__}: {e}")
+                traceback.print_exc()
+            if attempt < max_attempts - 1:
+                SESSION = create_session()
+                await asyncio.sleep(retry_delay)
+                continue
+            err = {"error": {
+                "message": str(e), "type": "upstream_error", "code": None}}
+            return Response(content=json.dumps(err).encode(),
+                            status_code=500, media_type="application/json")
+
+
+async def _passthrough_to_upstream_responses(request: Request):
+    """For non-Claude models (gpt-5.5/codex, gemini-*) the proxy cannot
+    translate into Anthropic Messages — upstream /v1/messages 404s those
+    models. Empirically the upstream /v1/responses endpoint accepts them
+    when (a) input is a list, (b) stream=true. So we passthrough the OpenAI
+    Responses request directly, normalize input shape, force stream=true,
+    and stream the SSE response back.
+    """
+    global SESSION
+    body = await request.body()
+    try:
+        openai_body = json.loads(body) if body else {}
+    except Exception as e:
+        return Response(
+            content=json.dumps({"error": {
+                "message": f"invalid JSON body: {e}",
+                "type": "invalid_request_error"}}).encode(),
+            status_code=400, media_type="application/json")
+
+    upstream_body = _normalize_responses_input_for_upstream(openai_body)
+    resolved_key = get_next_global_key(_extract_client_key(request))
+    headers = {
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+    }
+    if resolved_key:
+        headers["Authorization"] = f"Bearer {resolved_key}"
+        headers["x-api-key"] = resolved_key
+
+    target_url = "https://anyrouter.top/v1/responses"
+    if config['debug']:
+        print(f"\n{'='*60}")
+        print(f"[PASSTHROUGH-RESP] Target: {target_url}")
+        print(f"[PASSTHROUGH-RESP] Model: {upstream_body.get('model', 'N/A')} | forced stream=true")
+
+    max_attempts = 3
+    retry_delay = 1
+    for attempt in range(max_attempts):
+        try:
+            q = thread_queue.Queue(maxsize=256)
+            t = threading.Thread(
+                target=_stream_worker,
+                args=(SESSION, "POST", target_url, headers, upstream_body, q),
+                daemon=True,
+            )
+            t.start()
+            loop = asyncio.get_running_loop()
+            msg_type, value = await loop.run_in_executor(None, q.get)
+            if msg_type == "error":
+                raise value
+            status_code = value
+            if config['debug']:
+                print(f"[PASSTHROUGH-RESP] upstream status: {status_code}")
+
+            if status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
+                while True:
+                    mt, _ = await loop.run_in_executor(None, q.get)
+                    if mt in ("end", "error"):
+                        break
+                SESSION = create_session()
+                await asyncio.sleep(retry_delay)
+                continue
+
+            if status_code != 200:
+                chunks = []
+                while True:
+                    mt, v = await loop.run_in_executor(None, q.get)
+                    if mt == "data":
+                        chunks.append(v if isinstance(v, bytes) else v.encode())
+                    elif mt in ("end", "error"):
+                        break
+                err_body = anthropic_error_to_openai_error(
+                    b"".join(chunks), "response")
+                return Response(content=json.dumps(err_body).encode(),
+                                status_code=status_code,
+                                media_type="application/json")
+
+            # Stream the upstream SSE directly back to the client (no translation).
+            return StreamingResponse(
+                _passthrough_stream(q),
+                status_code=200, media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        except Exception as e:
+            if config['debug']:
+                print(f"[PASSTHROUGH-RESP] attempt {attempt+1} error: {type(e).__name__}: {e}")
+                traceback.print_exc()
+            if attempt < max_attempts - 1:
+                SESSION = create_session()
+                await asyncio.sleep(retry_delay)
+                continue
+            err = {"error": {
+                "message": str(e), "type": "upstream_error", "code": None}}
+            return Response(content=json.dumps(err).encode(),
+                            status_code=500, media_type="application/json")
+
+
+async def _passthrough_stream(q):
+    """Drain upstream SSE bytes unchanged."""
+    loop = asyncio.get_running_loop()
+    while True:
+        msg_type, value = await loop.run_in_executor(None, q.get)
+        if msg_type == "end":
+            break
+        if msg_type == "error":
+            if config['debug']:
+                print(f"[PASSTHROUGH-RESP] stream error: {value}")
+            break
+        if msg_type == "data":
+            yield value
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: Request):
+    """OpenAI Chat Completions endpoint.
+
+    Regardless of what model the client requests, the proxy maps to
+    PRIMARY_MODEL (claude-opus-4-7) and falls back to FALLBACK_MODEL
+    (claude-haiku-4-5) on upstream 5xx/429. Upstream is always
+    `/v1/messages` (Anthropic protocol).
+    """
+    return await _run_openai_translated_request(
+        request,
+        request_translator=chat_completions_to_anthropic,
+        response_translator=anthropic_to_chat_completion,
+        stream_machine_factory=lambda model, include_usage: AnthropicSSEToChatCompletionsStream(
+            requested_model=model, include_usage=include_usage),
+        error_shape="chat.completion",
+    )
+
+
+@app.post("/v1/responses")
+async def openai_responses(request: Request):
+    """OpenAI Responses API endpoint.
+
+    Regardless of what model the client requests, the proxy maps to
+    PRIMARY_MODEL (claude-opus-4-7) and falls back to FALLBACK_MODEL
+    (claude-haiku-4-5) on upstream 5xx/429. Upstream is always
+    `/v1/messages` (Anthropic protocol).
+    """
+    return await _run_openai_translated_request(
+        request,
+        request_translator=responses_request_to_anthropic,
+        response_translator=anthropic_to_responses_response,
+        stream_machine_factory=lambda model, _iu: AnthropicSSEToResponsesStream(
+            requested_model=model),
+        error_shape="response",
+    )
+
 @app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def proxy(path: str, request: Request):
     global SESSION
-    # Normalize base URL: strip trailing /v1 if present, always prepend /v1
+    # Normalize base URL candidates
     base = config['target_base_url'].rstrip('/')
-    if base.endswith('/v1'):
+    if "betterclau.de" in base:
+        base = "https://anyrouter.top"
+    elif base.endswith('/v1'):
         base = base[:-3]
-    target_url = f"{base}/v1/{path}"
-    if path == "messages":
-        target_url += "?beta=true"
+    candidate_urls = [f"{base}/v1/{path}"]
+        
     body = await request.body()
     body_json = {}
     wants_stream = False
@@ -338,26 +905,37 @@ async def proxy(path: str, request: Request):
                 print(f"[PROXY] Body parse error: {e}")
     model_name = body_json.get('model', '')
     headers = get_claude_headers(is_stream=wants_stream, model=model_name, client_headers=dict(request.headers))
-    # Pass through client's API key to upstream
+    # Pass through client's API key to upstream, with pool round-robin support
     req_api_key = request.headers.get("x-api-key", "")
     if not req_api_key:
         bearer = request.headers.get("Authorization", "")
         if bearer.startswith("Bearer "):
             req_api_key = bearer[7:]
-    if req_api_key:
-        headers["x-api-key"] = req_api_key
+            
+    resolved_key = get_next_global_key(req_api_key)
+    if resolved_key:
+        headers["x-api-key"] = resolved_key
+        headers["Authorization"] = f"Bearer {resolved_key}"
     if config['debug']:
         print(f"\n{'='*60}")
-        print(f"[PROXY] Target: {target_url}")
+        print(f"[PROXY] Target (Primary): {candidate_urls[0]}")
         print(f"[PROXY] Model: {body_json.get('model', 'N/A')}")
         print(f"[PROXY] Stream: {wants_stream}")
         print(f"[PROXY] TLS: curl_cffi/chrome")
     max_attempts = 5
     retry_delay = 1
     for attempt in range(max_attempts):
+        # Choose candidate URL based on attempt
+        target_url = candidate_urls[0]
+        if attempt > 0 and len(candidate_urls) > 1:
+            target_url = candidate_urls[1]
+            
+        if path == "messages" and "?beta=true" not in target_url:
+            target_url += "?beta=true"
+            
         try:
             if config['debug']:
-                print(f"[PROXY] Attempt {attempt + 1}/{max_attempts}...")
+                print(f"[PROXY] Attempt {attempt + 1}/{max_attempts} to {target_url}...")
                 sys.stdout.flush()
 
             if wants_stream:
@@ -375,7 +953,9 @@ async def proxy(path: str, request: Request):
                 status_code = value
                 if config['debug']:
                     print(f"[PROXY] Status: {status_code}")
-                if status_code in [520, 502]:
+                    
+                # If Cloudflare challenge 403, rate limits (429), or gateway errors, retry!
+                if status_code in [520, 502, 403, 429]:
                     # drain queue
                     while True:
                         mt, _ = await loop.run_in_executor(None, q.get)
@@ -386,7 +966,8 @@ async def proxy(path: str, request: Request):
                         await asyncio.sleep(retry_delay)
                         continue
                     return Response(content=b'{"error":{"message":"Network error after max retries"}}', status_code=502, media_type="application/json")
-                if status_code in [403, 500]:
+                    
+                if status_code in [500]:
                     chunks = []
                     while True:
                         mt, v = await loop.run_in_executor(None, q.get)
@@ -409,13 +990,13 @@ async def proxy(path: str, request: Request):
                 )
                 if config['debug']:
                     print(f"[PROXY] Status: {resp.status_code}")
-                if resp.status_code in [520, 502]:
+                if resp.status_code in [520, 502, 403, 429]:
                     if attempt < max_attempts - 1:
                         SESSION = create_session()
                         await asyncio.sleep(retry_delay)
                         continue
                     return Response(content=b'{"error":{"message":"Network error after max retries"}}', status_code=502, media_type="application/json")
-                if resp.status_code in [403, 500]:
+                if resp.status_code in [500]:
                     return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
                 return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
         except Exception as e:
@@ -475,6 +1056,16 @@ async def api_test_all(request: Request):
     if not _check_auth(request):
         raise HTTPException(status_code=401, detail="Not authenticated")
     api_key = request.headers.get("x-api-key", "")
+    if api_key:
+        req_keys = parse_api_keys(api_key)
+        if req_keys:
+            set_global_keys(req_keys)
+            
+        test_key = get_next_global_key(api_key)
+        if test_key:
+            fetched = await fetch_upstream_models_list(test_key)
+            if fetched:
+                update_models(fetched)
     results = await test_all_models(SESSION, config, get_claude_headers, api_key)
     return results
 
@@ -483,7 +1074,15 @@ async def api_test_one(model_name: str, request: Request):
     if not _check_auth(request):
         raise HTTPException(status_code=401, detail="Not authenticated")
     if model_name not in MODELS:
-        raise HTTPException(status_code=404, detail=f"Unknown model: {model_name}")
+        MODELS.append(model_name)
+        test_results[model_name] = {
+            "model": model_name,
+            "status": "untested",
+            "latency_ms": None,
+            "error_message": None,
+            "response_preview": None,
+            "tested_at": None,
+        }
     api_key = request.headers.get("x-api-key", "")
     result = await test_single_model(SESSION, config, model_name, get_claude_headers, api_key)
     return result

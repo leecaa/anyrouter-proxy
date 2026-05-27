@@ -10,7 +10,9 @@ MODELS=(
   "claude-haiku-4-5-20251001"
   "claude-opus-4-1-20250805"
   "claude-opus-4-6"
+  "claude-opus-4-7[1m]"
   "claude-sonnet-4-20250514"
+  "gpt-5.5"
 )
 
 GREEN='\033[0;32m'
