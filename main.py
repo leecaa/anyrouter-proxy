@@ -420,44 +420,14 @@ def _extract_client_key(request: Request) -> str:
     return ""
 
 
-# --- Model override strategy ---
-# Upstream anyrouter.top behavior (validated 2026-05-27):
-#   - /v1/chat/completions 404s gpt-5.5/gpt-5-codex
-#   - /v1/responses 404s gemini-2.5-pro, 500s gpt-5-codex (load limit)
-#   - /v1/messages 503s opus/sonnet 4.x (1m context overload), 429s 3.5-haiku
-#   - Only claude-haiku-4-5-20251001 is consistently 200.
-# Strategy: regardless of what model the downstream client requests, the
-# proxy maps to claude-opus-4-7 (the flagship Claude model with 1m context),
-# and on upstream 503/429/5xx automatically falls back to
-# claude-haiku-4-5-20251001 which is the known-good baseline.
-PRIMARY_MODEL = "claude-opus-4-7"
-FALLBACK_MODEL = "claude-haiku-4-5-20251001"
-
-# Circuit breaker: when PRIMARY_MODEL returns 5xx/429, mark it unhealthy for
-# this many seconds so subsequent requests skip the futile opus attempt and
-# go straight to FALLBACK_MODEL. This dramatically improves TTFB seen by
-# downstream proxies (e.g. NewAPI) that may cancel slow streams.
-_PRIMARY_BREAKER_COOLDOWN_S = 60.0
-_primary_unhealthy_until: float = 0.0
-_breaker_lock = threading.Lock()
-
-
-def _select_initial_model() -> str:
-    """Returns the model name to try first based on the circuit breaker state."""
-    with _breaker_lock:
-        if time.time() < _primary_unhealthy_until:
-            return FALLBACK_MODEL
-    return PRIMARY_MODEL
-
-
-def _mark_primary_unhealthy():
-    """Trip the circuit breaker for PRIMARY_MODEL."""
-    global _primary_unhealthy_until
-    with _breaker_lock:
-        _primary_unhealthy_until = time.time() + _PRIMARY_BREAKER_COOLDOWN_S
-        if config.get('debug'):
-            print(f"[CIRCUIT-BREAKER] {PRIMARY_MODEL} marked unhealthy for "
-                  f"{_PRIMARY_BREAKER_COOLDOWN_S}s")
+# --- Model strategy ---
+# The client's `model` field is passed through verbatim to upstream
+# `/v1/messages`. Proxy does NOT override the model, does NOT fall back to
+# another model, and does NOT trip a circuit breaker. If the upstream rejects
+# the model (e.g. returns 503 for an overloaded model, 404 for an unknown
+# model), that error is propagated to the downstream client as-is so the
+# downstream (e.g. NewAPI) can decide how to handle it.
+DEFAULT_MAX_TOKENS = 4096
 
 
 def _is_claude_model(model_name: str) -> bool:
@@ -575,16 +545,9 @@ async def _run_openai_translated_request(
     wants_stream = bool(openai_body.get("stream"))
     include_usage = bool((openai_body.get("stream_options") or {}).get("include_usage"))
 
-    # Override the client's model with our managed strategy:
-    # - First attempt uses PRIMARY_MODEL (claude-opus-4-7) UNLESS the circuit
-    #   breaker has tripped (i.e. PRIMARY has been 5xx recently), in which case
-    #   we go straight to FALLBACK_MODEL to keep TTFB low.
-    # - On upstream 5xx/429 we fall back to FALLBACK_MODEL (claude-haiku-4-5).
-    # This guarantees a real model response regardless of what the client
-    # asks for and regardless of which non-haiku upstream is currently
-    # overloaded.
-    requested_model_for_translator = model or PRIMARY_MODEL
-    effective_model = _select_initial_model()
+    # Pass through the client's model verbatim. NO override, NO fallback,
+    # NO circuit breaker. Upstream errors propagate as-is to the downstream.
+    effective_model = model or "claude-opus-4-7"
     anthropic_body["model"] = effective_model
 
     resolved_key = get_next_global_key(_extract_client_key(request))
@@ -593,8 +556,8 @@ async def _run_openai_translated_request(
     )
 
     target_url = "https://anyrouter.top/v1/messages"
-    max_attempts = 5
-    retry_delay = 0.3  # shorter than before so NewAPI downstream TTFB stays small
+    max_attempts = 1  # No retry, no fallback — upstream errors propagate.
+    retry_delay = 0
 
     if config['debug']:
         print(f"\n{'='*60}")
@@ -622,20 +585,12 @@ async def _run_openai_translated_request(
                     print(f"[OPENAI-TRANSLATOR] upstream status: {status_code} (model={effective_model})")
 
                 if status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
-                    # drain queue, reset session, retry — swap to fallback model
+                    # No fallback; just drain and retry on same model (only if
+                    # max_attempts > 1 which it currently isn't).
                     while True:
                         mt, _ = await loop.run_in_executor(None, q.get)
                         if mt in ("end", "error"):
                             break
-                    if effective_model == PRIMARY_MODEL:
-                        _mark_primary_unhealthy()
-                        effective_model = FALLBACK_MODEL
-                        anthropic_body["model"] = effective_model
-                        headers = _build_translated_anthropic_headers(
-                            request, resolved_key, effective_model, wants_stream
-                        )
-                        if config['debug']:
-                            print(f"[OPENAI-TRANSLATOR] falling back to {effective_model}")
                     SESSION = create_session()
                     await asyncio.sleep(retry_delay)
                     continue
@@ -670,15 +625,7 @@ async def _run_openai_translated_request(
                     print(f"[OPENAI-TRANSLATOR] upstream status: {resp.status_code} (model={effective_model})")
 
                 if resp.status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
-                    if effective_model == PRIMARY_MODEL:
-                        _mark_primary_unhealthy()
-                        effective_model = FALLBACK_MODEL
-                        anthropic_body["model"] = effective_model
-                        headers = _build_translated_anthropic_headers(
-                            request, resolved_key, effective_model, wants_stream
-                        )
-                        if config['debug']:
-                            print(f"[OPENAI-TRANSLATOR] falling back to {effective_model}")
+                    # No fallback; bare retry only if max_attempts > 1.
                     SESSION = create_session()
                     await asyncio.sleep(retry_delay)
                     continue
@@ -843,10 +790,9 @@ async def _passthrough_stream(q):
 async def openai_chat_completions(request: Request):
     """OpenAI Chat Completions endpoint.
 
-    Regardless of what model the client requests, the proxy maps to
-    PRIMARY_MODEL (claude-opus-4-7) and falls back to FALLBACK_MODEL
-    (claude-haiku-4-5) on upstream 5xx/429. Upstream is always
-    `/v1/messages` (Anthropic protocol).
+    Translates the OpenAI request into Anthropic Messages format and forwards
+    it to upstream `/v1/messages`. The `model` field is passed through verbatim.
+    Upstream errors (503, 404, etc.) propagate to the client as-is.
     """
     return await _run_openai_translated_request(
         request,
@@ -862,10 +808,9 @@ async def openai_chat_completions(request: Request):
 async def openai_responses(request: Request):
     """OpenAI Responses API endpoint.
 
-    Regardless of what model the client requests, the proxy maps to
-    PRIMARY_MODEL (claude-opus-4-7) and falls back to FALLBACK_MODEL
-    (claude-haiku-4-5) on upstream 5xx/429. Upstream is always
-    `/v1/messages` (Anthropic protocol).
+    Translates the OpenAI Responses request into Anthropic Messages format
+    and forwards it to upstream `/v1/messages`. The `model` field is passed
+    through verbatim. Upstream errors propagate to the client as-is.
     """
     return await _run_openai_translated_request(
         request,
