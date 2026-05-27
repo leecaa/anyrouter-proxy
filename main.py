@@ -421,13 +421,13 @@ def _extract_client_key(request: Request) -> str:
 
 
 # --- Model strategy ---
-# The proxy ALWAYS sends FORCED_UPSTREAM_MODEL (claude-opus-4-7) to upstream
-# /v1/messages first, regardless of what model the client sent. If upstream
-# returns 5xx/429 for opus-4-7, the proxy automatically falls back to
-# FALLBACK_MODEL (claude-haiku-4-5-20251001) to keep the downstream working
-# (e.g. NewAPI channel tests pass even when opus-4-7 upstream is overloaded).
+# The proxy ALWAYS sends FORCED_UPSTREAM_MODEL (claude-opus-4-7) to upstream,
+# regardless of what model the client sent. FALLBACK_MODEL is intentionally
+# also claude-opus-4-7 — when upstream returns 5xx/429, we retry with the
+# SAME opus-4-7 model (not switching to another model) hoping to hit a
+# brief window where upstream recovers.
 FORCED_UPSTREAM_MODEL = "claude-opus-4-7"
-FALLBACK_MODEL = "claude-haiku-4-5-20251001"
+FALLBACK_MODEL = "claude-opus-4-7"  # same as primary — no model switch
 DEFAULT_MAX_TOKENS = 4096
 
 
@@ -559,8 +559,8 @@ async def _run_openai_translated_request(
     )
 
     target_url = "https://anyrouter.top/v1/messages"
-    max_attempts = 3  # opus-4-7 attempt + fallback haiku attempt + 1 retry
-    retry_delay = 0.3
+    max_attempts = 6  # all same-model retries — try to hit a brief 200 window
+    retry_delay = 1.5  # total ~9s, within NewAPI's default 30s client timeout
 
     if config['debug']:
         print(f"\n{'='*60}")
