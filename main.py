@@ -421,11 +421,13 @@ def _extract_client_key(request: Request) -> str:
 
 
 # --- Model strategy ---
-# The proxy ALWAYS uses claude-opus-4-7 against the upstream `/v1/messages`,
-# regardless of what model the client sent. There is NO fallback: if upstream
-# returns 5xx for opus-4-7, that error is propagated to the downstream client
-# as-is (no swap to another model, no retry).
+# The proxy ALWAYS sends FORCED_UPSTREAM_MODEL (claude-opus-4-7) to upstream
+# /v1/messages first, regardless of what model the client sent. If upstream
+# returns 5xx/429 for opus-4-7, the proxy automatically falls back to
+# FALLBACK_MODEL (claude-haiku-4-5-20251001) to keep the downstream working
+# (e.g. NewAPI channel tests pass even when opus-4-7 upstream is overloaded).
 FORCED_UPSTREAM_MODEL = "claude-opus-4-7"
+FALLBACK_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_MAX_TOKENS = 4096
 
 
@@ -557,8 +559,8 @@ async def _run_openai_translated_request(
     )
 
     target_url = "https://anyrouter.top/v1/messages"
-    max_attempts = 1  # No retry, no fallback — upstream errors propagate.
-    retry_delay = 0
+    max_attempts = 3  # opus-4-7 attempt + fallback haiku attempt + 1 retry
+    retry_delay = 0.3
 
     if config['debug']:
         print(f"\n{'='*60}")
@@ -586,12 +588,19 @@ async def _run_openai_translated_request(
                     print(f"[OPENAI-TRANSLATOR] upstream status: {status_code} (model={effective_model})")
 
                 if status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
-                    # No fallback; just drain and retry on same model (only if
-                    # max_attempts > 1 which it currently isn't).
+                    # drain queue, reset session, fall back to FALLBACK_MODEL
                     while True:
                         mt, _ = await loop.run_in_executor(None, q.get)
                         if mt in ("end", "error"):
                             break
+                    if effective_model == FORCED_UPSTREAM_MODEL:
+                        effective_model = FALLBACK_MODEL
+                        anthropic_body["model"] = effective_model
+                        headers = _build_translated_anthropic_headers(
+                            request, resolved_key, effective_model, wants_stream
+                        )
+                        if config['debug']:
+                            print(f"[OPENAI-TRANSLATOR] {FORCED_UPSTREAM_MODEL} → {effective_model}")
                     SESSION = create_session()
                     await asyncio.sleep(retry_delay)
                     continue
@@ -626,7 +635,14 @@ async def _run_openai_translated_request(
                     print(f"[OPENAI-TRANSLATOR] upstream status: {resp.status_code} (model={effective_model})")
 
                 if resp.status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
-                    # No fallback; bare retry only if max_attempts > 1.
+                    if effective_model == FORCED_UPSTREAM_MODEL:
+                        effective_model = FALLBACK_MODEL
+                        anthropic_body["model"] = effective_model
+                        headers = _build_translated_anthropic_headers(
+                            request, resolved_key, effective_model, wants_stream
+                        )
+                        if config['debug']:
+                            print(f"[OPENAI-TRANSLATOR] {FORCED_UPSTREAM_MODEL} → {effective_model}")
                     SESSION = create_session()
                     await asyncio.sleep(retry_delay)
                     continue
