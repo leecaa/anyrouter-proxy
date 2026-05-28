@@ -317,6 +317,21 @@ def get_claude_headers(is_stream=False, model="", client_headers=None):
             merged = proxy_flags | client_flags | _REQUIRED_BETA_FLAGS
             merged.discard("")
             headers["anthropic-beta"] = ",".join(sorted(merged))
+        # Prefer client's User-Agent if it's a valid claude-cli UA
+        client_ua = client_headers.get("user-agent", "")
+        if client_ua.startswith("claude-cli/"):
+            headers["User-Agent"] = client_ua
+        # Prefer client's Stainless metadata (arch, os, versions evolve with CLI)
+        _STAINLESS_FORWARD = {
+            "x-stainless-arch": "X-Stainless-Arch",
+            "x-stainless-os": "X-Stainless-OS",
+            "x-stainless-package-version": "X-Stainless-Package-Version",
+            "x-stainless-runtime-version": "X-Stainless-Runtime-Version",
+        }
+        for lower_key, header_key in _STAINLESS_FORWARD.items():
+            val = client_headers.get(lower_key)
+            if val:
+                headers[header_key] = val
         client_retry = client_headers.get("X-Stainless-Retry-Count") or client_headers.get("x-stainless-retry-count")
         if client_retry is not None:
             headers["X-Stainless-Retry-Count"] = client_retry
@@ -941,7 +956,8 @@ async def proxy(path: str, request: Request):
             print(f"  {k}: {v[:12]}...{v[-4:]}" if len(v) > 20 else f"  {k}: ***")
         else:
             print(f"  {k}: {v}")
-    print(f"[OUTBOUND] model={body_json.get('model', 'N/A')}, stream={wants_stream}, TLS=curl_cffi/chrome")
+    print(f"[OUTBOUND] model={body_json.get('model', 'N/A')}, stream={wants_stream}, "
+          f"body_bytes={len(json.dumps(body_json)) if body_json else 0}, TLS=curl_cffi/chrome")
     max_attempts = 5
     retry_delay = 1
     for attempt in range(max_attempts):
@@ -949,14 +965,14 @@ async def proxy(path: str, request: Request):
         target_url = candidate_urls[0]
         if attempt > 0 and len(candidate_urls) > 1:
             target_url = candidate_urls[1]
-            
+
         # NOTE: ?beta=true removed — it triggers upstream 520 (Cloudflare).
         # 1m context is activated via anthropic-beta header instead.
-            
+
+        attempt_start = time.time()
         try:
-            if config['debug']:
-                print(f"[PROXY] Attempt {attempt + 1}/{max_attempts} to {target_url}...")
-                sys.stdout.flush()
+            print(f"[PROXY] Attempt {attempt + 1}/{max_attempts} to {target_url}...")
+            sys.stdout.flush()
 
             if wants_stream:
                 q = thread_queue.Queue(maxsize=256)
@@ -971,17 +987,18 @@ async def proxy(path: str, request: Request):
                 if msg_type == "error":
                     raise value
                 status_code = value
-                if config['debug']:
-                    print(f"[PROXY] Status: {status_code}")
-                    
+                elapsed = time.time() - attempt_start
+                print(f"[PROXY] Status: {status_code} (took {elapsed:.2f}s, stream)")
+
                 # If Cloudflare challenge 403, rate limits (429), or gateway errors, retry!
-                if status_code in [520, 502, 403, 429]:
+                if status_code in [520, 502, 503, 403, 429]:
                     # drain queue
                     while True:
                         mt, _ = await loop.run_in_executor(None, q.get)
                         if mt in ("end", "error"):
                             break
                     if attempt < max_attempts - 1:
+                        print(f"[PROXY] Retrying attempt {attempt + 2} after upstream {status_code}")
                         SESSION = create_session()
                         await asyncio.sleep(retry_delay)
                         continue
@@ -1008,10 +1025,11 @@ async def proxy(path: str, request: Request):
                     SESSION.request, request.method, target_url,
                     headers=headers, json=body_json, timeout=600,
                 )
-                if config['debug']:
-                    print(f"[PROXY] Status: {resp.status_code}")
-                if resp.status_code in [520, 502, 403, 429]:
+                elapsed = time.time() - attempt_start
+                print(f"[PROXY] Status: {resp.status_code} (took {elapsed:.2f}s)")
+                if resp.status_code in [520, 502, 503, 403, 429]:
                     if attempt < max_attempts - 1:
+                        print(f"[PROXY] Retrying attempt {attempt + 2} after upstream {resp.status_code}")
                         SESSION = create_session()
                         await asyncio.sleep(retry_delay)
                         continue
