@@ -307,9 +307,12 @@ def get_claude_headers(is_stream=False, model="", client_headers=None):
 
     # If client already sends Claude CLI headers, prefer its values for
     # evolving fields (beta flags may be newer, retry count is per-request).
+    # ALWAYS ensure context-1m-2025-08-07 is present (upstream requires it).
     if client_headers:
         client_beta = client_headers.get("anthropic-beta")
         if client_beta and len(client_beta) > len(beta):
+            if "context-1m-2025-08-07" not in client_beta:
+                client_beta = client_beta + ",context-1m-2025-08-07"
             headers["anthropic-beta"] = client_beta
         client_retry = client_headers.get("X-Stainless-Retry-Count") or client_headers.get("x-stainless-retry-count")
         if client_retry is not None:
@@ -934,8 +937,8 @@ async def proxy(path: str, request: Request):
         if attempt > 0 and len(candidate_urls) > 1:
             target_url = candidate_urls[1]
             
-        if path == "messages" and "?beta=true" not in target_url:
-            target_url += "?beta=true"
+        # NOTE: ?beta=true removed — it triggers upstream 520 (Cloudflare).
+        # 1m context is activated via anthropic-beta header instead.
             
         try:
             if config['debug']:
