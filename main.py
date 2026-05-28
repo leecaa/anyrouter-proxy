@@ -305,15 +305,18 @@ def get_claude_headers(is_stream=False, model="", client_headers=None):
         "Accept-Encoding": "gzip, deflate, br, zstd",
     }
 
-    # If client already sends Claude CLI headers, prefer its values for
-    # evolving fields (beta flags may be newer, retry count is per-request).
+    # Merge client's anthropic-beta with proxy's required flags.
+    # Strategy: union of all flags, ensuring critical ones are never lost.
     # ALWAYS ensure context-1m-2025-08-07 is present (upstream requires it).
+    _REQUIRED_BETA_FLAGS = {"context-1m-2025-08-07"}
     if client_headers:
         client_beta = client_headers.get("anthropic-beta")
-        if client_beta and len(client_beta) > len(beta):
-            if "context-1m-2025-08-07" not in client_beta:
-                client_beta = client_beta + ",context-1m-2025-08-07"
-            headers["anthropic-beta"] = client_beta
+        if client_beta:
+            proxy_flags = set(beta.split(","))
+            client_flags = set(client_beta.split(","))
+            merged = proxy_flags | client_flags | _REQUIRED_BETA_FLAGS
+            merged.discard("")
+            headers["anthropic-beta"] = ",".join(sorted(merged))
         client_retry = client_headers.get("X-Stainless-Retry-Count") or client_headers.get("x-stainless-retry-count")
         if client_retry is not None:
             headers["X-Stainless-Retry-Count"] = client_retry
@@ -862,22 +865,32 @@ async def proxy(path: str, request: Request):
     elif base.endswith('/v1'):
         base = base[:-3]
     candidate_urls = [f"{base}/v1/{path}"]
-        
+
+    # --- Inbound request logging ---
+    client_ip = request.client.host if request.client else "unknown"
+    print(f"\n{'='*60}")
+    print(f"[INBOUND] {request.method} /v1/{path} from {client_ip}")
+    print(f"[INBOUND] Headers:")
+    for k, v in request.headers.items():
+        if k.lower() in ("x-api-key", "authorization"):
+            print(f"  {k}: {v[:12]}...{v[-4:]}" if len(v) > 20 else f"  {k}: ***")
+        else:
+            print(f"  {k}: {v}")
+
     body = await request.body()
     body_json = {}
     wants_stream = False
     if body:
         try:
             body_json = json.loads(body)
-            # 透传客户端 body，仅做最小改写
             model = body_json.get('model', '')
             if 'anyrouter/' in model:
                 body_json['model'] = model.replace('anyrouter/', '')
 
-            if config['debug']:
-                print(f"[PROXY] Request keys: {list(body_json.keys())}")
-                print(f"[PROXY] Model: {model}, tools: {len(body_json.get('tools', []))}, "
-                      f"system: {'yes' if body_json.get('system') else 'no'}")
+            print(f"[INBOUND] Body keys: {list(body_json.keys())}")
+            print(f"[INBOUND] model={model}, tools={len(body_json.get('tools', []))}, "
+                  f"system={'yes' if body_json.get('system') else 'no'}, "
+                  f"stream={body_json.get('stream', False)}")
 
             # 检测客户端类型：有 tools 或 system 的是富客户端（Xcode/Claude Code），直接透传
             is_bare_client = not body_json.get('tools') and not body_json.get('system')
@@ -894,11 +907,9 @@ async def proxy(path: str, request: Request):
                     body_json['context_management'] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
                 if 'output_config' not in body_json:
                     body_json['output_config'] = {"effort": "medium"}
-                if config['debug']:
-                    print(f"[PROXY] Bare client detected, injected Claude Code camouflage")
+                print(f"[INBOUND] Client type: BARE → injected Claude Code camouflage")
             else:
-                if config['debug']:
-                    print(f"[PROXY] Rich client detected, passthrough body as-is")
+                print(f"[INBOUND] Client type: RICH → passthrough body as-is")
 
             # 始终确保 metadata.user_id（伪装必需）
             if 'metadata' not in body_json:
@@ -918,17 +929,19 @@ async def proxy(path: str, request: Request):
         bearer = request.headers.get("Authorization", "")
         if bearer.startswith("Bearer "):
             req_api_key = bearer[7:]
-            
+
     resolved_key = get_next_global_key(req_api_key)
     if resolved_key:
         headers["x-api-key"] = resolved_key
         headers["Authorization"] = f"Bearer {resolved_key}"
-    if config['debug']:
-        print(f"\n{'='*60}")
-        print(f"[PROXY] Target (Primary): {candidate_urls[0]}")
-        print(f"[PROXY] Model: {body_json.get('model', 'N/A')}")
-        print(f"[PROXY] Stream: {wants_stream}")
-        print(f"[PROXY] TLS: curl_cffi/chrome")
+    print(f"[OUTBOUND] Target: {candidate_urls[0]}")
+    print(f"[OUTBOUND] Headers:")
+    for k, v in headers.items():
+        if k.lower() in ("x-api-key", "authorization"):
+            print(f"  {k}: {v[:12]}...{v[-4:]}" if len(v) > 20 else f"  {k}: ***")
+        else:
+            print(f"  {k}: {v}")
+    print(f"[OUTBOUND] model={body_json.get('model', 'N/A')}, stream={wants_stream}, TLS=curl_cffi/chrome")
     max_attempts = 5
     retry_delay = 1
     for attempt in range(max_attempts):
