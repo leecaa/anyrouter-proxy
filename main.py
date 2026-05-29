@@ -315,6 +315,8 @@ def get_claude_headers(is_stream=False, model="", client_headers=None):
             proxy_flags = set(beta.split(","))
             client_flags = set(client_beta.split(","))
             merged = proxy_flags | client_flags | _REQUIRED_BETA_FLAGS
+            if not _needs_context_1m_beta(model):
+                merged = {"interleaved-thinking-2025-05-14"}
             merged.discard("")
             headers["anthropic-beta"] = ",".join(sorted(merged))
         # Prefer client's User-Agent if it's a valid claude-cli UA
@@ -431,33 +433,23 @@ async def health():
     }
 
 def _extract_client_key(request: Request) -> str:
-    """Extract API key from request headers (x-api-key preferred, then Bearer)."""
-    k = request.headers.get("x-api-key", "")
-    if k:
-        return k
+    """Extract API key from request headers (Bearer preferred, then x-api-key)."""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
+    k = request.headers.get("x-api-key", "")
+    if k:
+        return k
     return ""
 
 
 # --- Model strategy ---
-# CLIENT-FACING model identity is ALWAYS FORCED_UPSTREAM_MODEL (claude-opus-4-7),
-# regardless of what the client sent OR which upstream model actually served.
-#
-# UPSTREAM behavior:
-#   - First attempt: claude-opus-4-7 (the user's stated preferred model)
-#   - If 5xx/429: silently fall back to FALLBACK_UPSTREAM_MODEL (haiku-4-5)
-#     because anyrouter.top has had persistent 100% upstream 503 for opus-4-7
-#     (global Opus quota burned). Without this silent fallback the downstream
-#     (NewAPI tianyun channel) gets 0% success.
-#
-# Per user instruction "fallback 也使用 opus-4-7", the response.model field
-# we hand back to the client is always claude-opus-4-7. The actual backend
-# that served the response is transparent to the client.
-FORCED_UPSTREAM_MODEL = "claude-opus-4-7"
-FALLBACK_UPSTREAM_MODEL = "claude-haiku-4-5-20251001"  # silent fallback when opus is overloaded
-CLIENT_FACING_MODEL = "claude-opus-4-7"  # what the client always sees in response.model
+# The client's `model` field is passed through verbatim to upstream
+# `/v1/messages`. Proxy does NOT override the model, does NOT fall back to
+# another model, and does NOT trip a circuit breaker. If the upstream rejects
+# the model (e.g. returns 503 for an overloaded model, 404 for an unknown
+# model), that error is propagated to the downstream client as-is so the
+# downstream (e.g. NewAPI) can decide how to handle it.
 DEFAULT_MAX_TOKENS = 4096
 
 
@@ -576,11 +568,9 @@ async def _run_openai_translated_request(
     wants_stream = bool(openai_body.get("stream"))
     include_usage = bool((openai_body.get("stream_options") or {}).get("include_usage"))
 
-    # FORCED model override: regardless of what the client requested, we always
-    # send claude-opus-4-7 to upstream. NO fallback — upstream errors propagate
-    # transparently. The downstream response's `model` field also reports
-    # claude-opus-4-7 (the actual model that produced the answer).
-    effective_model = FORCED_UPSTREAM_MODEL
+    # Pass through the client's model verbatim. NO override, NO fallback,
+    # NO circuit breaker. Upstream errors propagate as-is to the downstream.
+    effective_model = model or "claude-opus-4-7"
     anthropic_body["model"] = effective_model
 
     resolved_key = get_next_global_key(_extract_client_key(request))
@@ -589,8 +579,8 @@ async def _run_openai_translated_request(
     )
 
     target_url = "https://anyrouter.top/v1/messages"
-    max_attempts = 3  # try opus → silent-fallback haiku → 1 retry
-    retry_delay = 0.3
+    max_attempts = 1  # No retry, no fallback — upstream errors propagate.
+    retry_delay = 0
 
     if config['debug']:
         print(f"\n{'='*60}")
@@ -618,19 +608,11 @@ async def _run_openai_translated_request(
                     print(f"[OPENAI-TRANSLATOR] upstream status: {status_code} (model={effective_model})")
 
                 if status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
-                    # drain queue, reset session, silently fall back to haiku
+                    # No fallback; just drain and retry on same model
                     while True:
                         mt, _ = await loop.run_in_executor(None, q.get)
                         if mt in ("end", "error"):
                             break
-                    if effective_model == FORCED_UPSTREAM_MODEL:
-                        effective_model = FALLBACK_UPSTREAM_MODEL
-                        anthropic_body["model"] = effective_model
-                        headers = _build_translated_anthropic_headers(
-                            request, resolved_key, effective_model, wants_stream
-                        )
-                        if config['debug']:
-                            print(f"[OPENAI-TRANSLATOR] silent fallback: upstream={effective_model} (client still sees {CLIENT_FACING_MODEL})")
                     SESSION = create_session()
                     await asyncio.sleep(retry_delay)
                     continue
@@ -650,7 +632,7 @@ async def _run_openai_translated_request(
                                     status_code=status_code,
                                     media_type="application/json")
 
-                machine = stream_machine_factory(CLIENT_FACING_MODEL, include_usage)
+                machine = stream_machine_factory(effective_model, include_usage)
                 return StreamingResponse(
                     _translated_stream(q, machine),
                     status_code=200, media_type="text/event-stream",
@@ -665,14 +647,7 @@ async def _run_openai_translated_request(
                     print(f"[OPENAI-TRANSLATOR] upstream status: {resp.status_code} (model={effective_model})")
 
                 if resp.status_code in (520, 502, 503, 403, 429) and attempt < max_attempts - 1:
-                    if effective_model == FORCED_UPSTREAM_MODEL:
-                        effective_model = FALLBACK_UPSTREAM_MODEL
-                        anthropic_body["model"] = effective_model
-                        headers = _build_translated_anthropic_headers(
-                            request, resolved_key, effective_model, wants_stream
-                        )
-                        if config['debug']:
-                            print(f"[OPENAI-TRANSLATOR] silent fallback: upstream={effective_model} (client still sees {CLIENT_FACING_MODEL})")
+                    # No fallback; bare retry only if max_attempts > 1.
                     SESSION = create_session()
                     await asyncio.sleep(retry_delay)
                     continue
@@ -694,9 +669,7 @@ async def _run_openai_translated_request(
                                     status_code=502, media_type="application/json")
 
                 try:
-                    # Always report CLIENT_FACING_MODEL (claude-opus-4-7) to
-                    # the client, regardless of which upstream model served.
-                    openai_resp = response_translator(a_body, CLIENT_FACING_MODEL)
+                    openai_resp = response_translator(a_body, effective_model)
                 except Exception as e:
                     if config['debug']:
                         print(f"[OPENAI-TRANSLATOR] response translation failed: {type(e).__name__}: {e}")
@@ -910,8 +883,9 @@ async def proxy(path: str, request: Request):
             # 检测客户端类型：有 tools 或 system 的是富客户端（Xcode/Claude Code），直接透传
             is_bare_client = not body_json.get('tools') and not body_json.get('system')
             is_claude_model = any(k in model.lower() for k in ('sonnet', 'opus', 'haiku'))
+            is_test_probe = body_json.get('max_tokens') is not None and isinstance(body_json.get('max_tokens'), int) and body_json.get('max_tokens') <= 10
 
-            if is_bare_client and is_claude_model and CLAUDE_CODE_TOOLS:
+            if is_bare_client and is_claude_model and CLAUDE_CODE_TOOLS and not is_test_probe:
                 # 裸客户端（curl/OpenCode 等）：注入 Claude Code 伪装模板
                 body_json['tools'] = CLAUDE_CODE_TOOLS
                 if CLAUDE_CODE_SYSTEM:
@@ -991,7 +965,7 @@ async def proxy(path: str, request: Request):
                 print(f"[PROXY] Status: {status_code} (took {elapsed:.2f}s, stream)")
 
                 # If Cloudflare challenge 403, rate limits (429), or gateway errors, retry!
-                if status_code in [520, 502, 503, 403, 429]:
+                if status_code in [520, 502, 403, 429]:
                     # drain queue
                     while True:
                         mt, _ = await loop.run_in_executor(None, q.get)
@@ -1003,6 +977,20 @@ async def proxy(path: str, request: Request):
                         await asyncio.sleep(retry_delay)
                         continue
                     return Response(content=b'{"error":{"message":"Network error after max retries"}}', status_code=502, media_type="application/json")
+
+                # 503 = upstream quota exhaustion — pass through immediately
+                # (retrying wastes time and causes NewAPI to disable the channel)
+                if status_code == 503:
+                    chunks = []
+                    while True:
+                        mt, v = await loop.run_in_executor(None, q.get)
+                        if mt == "data":
+                            chunks.append(v if isinstance(v, bytes) else v.encode())
+                        elif mt in ("end", "error"):
+                            break
+                    error_content = b"".join(chunks)
+                    print(f"[PROXY] Upstream 503 — passing through to client (no retry)")
+                    return Response(content=error_content, status_code=503, media_type="application/json")
                     
                 if status_code in [500]:
                     chunks = []
@@ -1027,14 +1015,15 @@ async def proxy(path: str, request: Request):
                 )
                 elapsed = time.time() - attempt_start
                 print(f"[PROXY] Status: {resp.status_code} (took {elapsed:.2f}s)")
-                if resp.status_code in [520, 502, 503, 403, 429]:
+                if resp.status_code in [520, 502, 403, 429]:
                     if attempt < max_attempts - 1:
                         print(f"[PROXY] Retrying attempt {attempt + 2} after upstream {resp.status_code}")
                         SESSION = create_session()
                         await asyncio.sleep(retry_delay)
                         continue
                     return Response(content=b'{"error":{"message":"Network error after max retries"}}', status_code=502, media_type="application/json")
-                if resp.status_code in [500]:
+                # 503 = upstream quota — pass through immediately (no retry)
+                if resp.status_code in [500, 503]:
                     return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
                 return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
         except Exception as e:
@@ -1085,12 +1074,12 @@ async def dashboard_logout():
 async def dashboard_page(request: Request):
     if not _check_auth(request):
         return RedirectResponse("/dashboard/login", status_code=302)
-    return HTMLResponse(get_dashboard_html(MODELS))
+    return HTMLResponse(get_dashboard_html(model_tester.MODELS))
 
 # --- Dashboard API ---
 
-@app.post("/api/test-all")
-async def api_test_all(request: Request):
+@app.post("/api/fetch-models")
+async def api_fetch_models(request: Request):
     if not _check_auth(request):
         raise HTTPException(status_code=401, detail="Not authenticated")
     api_key = request.headers.get("x-api-key", "")
@@ -1104,6 +1093,17 @@ async def api_test_all(request: Request):
             fetched = await fetch_upstream_models_list(test_key)
             if fetched:
                 update_models(fetched)
+    return {"status": "ok", "models": MODELS}
+
+@app.post("/api/test-all")
+async def api_test_all(request: Request):
+    if not _check_auth(request):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    api_key = request.headers.get("x-api-key", "")
+    if api_key:
+        req_keys = parse_api_keys(api_key)
+        if req_keys:
+            set_global_keys(req_keys)
     results = await test_all_models(SESSION, config, get_claude_headers, api_key)
     return results
 
