@@ -42,8 +42,8 @@ def resolve_config_path():
 CONFIG_FILE = resolve_config_path()
 
 DEFAULT_CONFIG = {
-    "proxy_url": "http://127.0.0.1:2080",
-    "use_proxy": True,
+    "proxy_url": "",
+    "use_proxy": False,
     "debug": False,
     "target_base_url": "https://anyrouter.top",
     "host": "127.0.0.1",
@@ -964,35 +964,8 @@ async def proxy(path: str, request: Request):
                 elapsed = time.time() - attempt_start
                 print(f"[PROXY] Status: {status_code} (took {elapsed:.2f}s, stream)")
 
-                # If Cloudflare challenge 403, rate limits (429), or gateway errors, retry!
-                if status_code in [520, 502, 403, 429]:
-                    # drain queue
-                    while True:
-                        mt, _ = await loop.run_in_executor(None, q.get)
-                        if mt in ("end", "error"):
-                            break
-                    if attempt < max_attempts - 1:
-                        print(f"[PROXY] Retrying attempt {attempt + 2} after upstream {status_code}")
-                        SESSION = create_session()
-                        await asyncio.sleep(retry_delay)
-                        continue
-                    return Response(content=b'{"error":{"message":"Network error after max retries"}}', status_code=502, media_type="application/json")
-
-                # 503 = upstream quota exhaustion — pass through immediately
-                # (retrying wastes time and causes NewAPI to disable the channel)
-                if status_code == 503:
-                    chunks = []
-                    while True:
-                        mt, v = await loop.run_in_executor(None, q.get)
-                        if mt == "data":
-                            chunks.append(v if isinstance(v, bytes) else v.encode())
-                        elif mt in ("end", "error"):
-                            break
-                    error_content = b"".join(chunks)
-                    print(f"[PROXY] Upstream 503 — passing through to client (no retry)")
-                    return Response(content=error_content, status_code=503, media_type="application/json")
-                    
-                if status_code in [500]:
+                # If status_code indicates error (>= 400), retrieve full content and return direct response
+                if status_code >= 400:
                     chunks = []
                     while True:
                         mt, v = await loop.run_in_executor(None, q.get)
@@ -1002,8 +975,9 @@ async def proxy(path: str, request: Request):
                             break
                     error_content = b"".join(chunks)
                     if config['debug']:
-                        print(f"[PROXY] Error response: {error_content.decode('utf-8', errors='ignore')[:500]}")
+                        print(f"[PROXY] Upstream error {status_code} — passing through to client (took {elapsed:.2f}s)")
                     return Response(content=error_content, status_code=status_code, media_type="application/json")
+
                 return StreamingResponse(
                     _async_chunks(q), status_code=status_code, media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -1015,16 +989,6 @@ async def proxy(path: str, request: Request):
                 )
                 elapsed = time.time() - attempt_start
                 print(f"[PROXY] Status: {resp.status_code} (took {elapsed:.2f}s)")
-                if resp.status_code in [520, 502, 403, 429]:
-                    if attempt < max_attempts - 1:
-                        print(f"[PROXY] Retrying attempt {attempt + 2} after upstream {resp.status_code}")
-                        SESSION = create_session()
-                        await asyncio.sleep(retry_delay)
-                        continue
-                    return Response(content=b'{"error":{"message":"Network error after max retries"}}', status_code=502, media_type="application/json")
-                # 503 = upstream quota — pass through immediately (no retry)
-                if resp.status_code in [500, 503]:
-                    return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
                 return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
         except Exception as e:
             if config['debug']:
